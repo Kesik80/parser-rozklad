@@ -283,37 +283,58 @@ async function retryFailed() {
   await runFetch(tids);
 }
 
+// Завантаження з обмеженим паралелізмом (максимум concurrency одночасно)
+async function fetchWithLimit(tids, concurrency, onEach) {
+  const queue = [...tids];
+  const results = [];
+  async function worker() {
+    while (queue.length) {
+      const tid = queue.shift();
+      const result = await onEach(tid);
+      results.push(result);
+    }
+  }
+  const workers = Array.from({ length: Math.min(concurrency, tids.length) }, worker);
+  await Promise.all(workers);
+  return results;
+}
+
 async function runFetch(tids) {
   const { searchKey, stations } = _state;
   document.getElementById('parseBtn').disabled = true;
-  setStatus(`Завантажую ${tids.length} поїздів...`, 'info');
+  setStatus(`Завантажую ${tids.length} поїздів (макс. 4 паралельно)...`, 'info');
   setProgress(10);
 
-  const fetchAll = tids.map(tid =>
-    fetchTrain(tid)
-      .then(data => {
-        const trainNum = parseInt(data.trainNum) || 0;
-        const isOdd = trainNum % 2 === 1;
-        const isT = searchKey === 'tereschky';
-        const poltavaIsDestination = isT ? !isOdd : isOdd;
-        const times = {};
-        stations.forEach(st => {
-          times[st] = findTime(data.stations, getStationSearch(st), getStationUseArr(st, poltavaIsDestination));
-        });
-        return { tid, trainNum: data.trainNum, times, parity: trainNum % 2 };
-      })
-      .catch(e => { console.warn(`tid=${tid}:`, e.message); return { tid, failed: true }; })
-  );
-
-  const settled = await Promise.allSettled(fetchAll);
-  settled.forEach(r => {
-    if (r.status === 'fulfilled' && r.value) {
-      if (r.value.failed) {
-        _state.failedTids.push(r.value.tid);
-      } else {
-        _state.results = _state.results.filter(x => x.tid !== r.value.tid);
-        _state.results.push(r.value);
-      }
+  let done = 0;
+  const allResults = await fetchWithLimit(tids, 4, async tid => {
+    try {
+      const data = await fetchTrain(tid);
+      const trainNum = parseInt(data.trainNum) || 0;
+      const isOdd = trainNum % 2 === 1;
+      const isT = searchKey === 'tereschky';
+      const poltavaIsDestination = isT ? !isOdd : isOdd;
+      const times = {};
+      stations.forEach(st => {
+        times[st] = findTime(data.stations, getStationSearch(st), getStationUseArr(st, poltavaIsDestination));
+      });
+      done++;
+      setProgress(10 + Math.round(done / tids.length * 85));
+      setStatus(`Завантажую... ${done}/${tids.length}`, 'info');
+      return { tid, trainNum: data.trainNum, times, parity: trainNum % 2 };
+    } catch(e) {
+      console.warn(`tid=${tid}:`, e.message);
+      done++;
+      setProgress(10 + Math.round(done / tids.length * 85));
+      return { tid, failed: true };
+    }
+  });
+  allResults.forEach(r => {
+    if (!r) return;
+    if (r.failed) {
+      _state.failedTids.push(r.tid);
+    } else {
+      _state.results = _state.results.filter(x => x.tid !== r.tid);
+      _state.results.push(r);
     }
   });
 

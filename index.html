@@ -179,6 +179,7 @@ async function autoLoadTids() {
   const keys = mode === 'both' ? ['tereschky', 'kopily'] : [mode];
   const allTids = [];
   const allNums = [];
+  _tidRouteMap = {};
 
   for (const key of keys) {
     statusEl.textContent = `⏳ Завантажую список поїздів (${key})...`;
@@ -188,7 +189,11 @@ async function autoLoadTids() {
       const data = await res.json();
       if (!data.trains?.length) throw new Error('Поїзди не знайдені');
       data.trains.forEach(t => {
-        if (!allTids.includes(t.tid)) { allTids.push(t.tid); allNums.push(t.trainNum); }
+        if (!allTids.includes(t.tid)) {
+          allTids.push(t.tid);
+          allNums.push(t.trainNum);
+          _tidRouteMap[t.tid] = key;  // зберігаємо маршрут одразу
+        }
       });
     } catch(e) {
       statusEl.style.color = 'var(--red)';
@@ -198,15 +203,6 @@ async function autoLoadTids() {
   }
 
   document.getElementById('tids').value = allTids.join(', ');
-  // Зберігаємо маппінг tid→маршрут
-  _tidRouteMap = {};
-  for (const key of keys) {
-    try {
-      const res = await fetch(`/api/fetch-station?sid=${PRESETS[key].sid}`);
-      const data = await res.json();
-      data.trains?.forEach(t => { _tidRouteMap[t.tid] = key; });
-    } catch(e) {}
-  }
   statusEl.style.color = 'var(--green)';
   statusEl.textContent = `✅ Знайдено ${allTids.length} поїздів: ${allNums.join(', ')}`;
 }
@@ -219,11 +215,15 @@ function matchStation(rawName, wanted) {
   const clean = normalizeStation(rawName);
   const w = wanted.toLowerCase();
   if (clean === w) return true;
-  if (clean.includes(w) || w.includes(clean)) return true;
   const cleanND = clean.replace(/[\s\-]/g, '');
   const wND = w.replace(/[\s\-]/g, '');
   if (cleanND === wND) return true;
-  if (clean.length >= 4 && w.length >= 4 && clean.slice(0,5) === w.slice(0,5)) return true;
+  // Входження — але тільки якщо clean не набагато довший (Головач ≠ Головачанська)
+  if (w.includes(clean) && clean.length >= 4) return true;
+  if (clean.includes(w) && clean.length <= w.length + 4) return true;
+  // Перші 6 букв + близька довжина (для опечаток)
+  if (clean.length >= 5 && w.length >= 5 && clean.slice(0,6) === w.slice(0,6)
+      && Math.abs(clean.length - w.length) <= 4) return true;
   return false;
 }
 function findTime(stations, wanted, useArr = false) {

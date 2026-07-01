@@ -96,24 +96,22 @@ pre { background:var(--bg-2); border-radius:8px; padding:10px; font-size:11px; c
 <div class="card">
   <div class="card-title">Налаштування</div>
 
-  <label>Станція пошуку (визначає напрямки)</label>
+  <label>Маршрут</label>
   <select id="searchStation" onchange="onSearchStationChange()">
-    <option value="tereschky">Терешки (непарні ← з Полтави, парні → на Полтаву)</option>
-    <option value="kopily">Копили (парні ← з Полтави, непарні → на Полтаву)</option>
+    <option value="both">Обидва маршрути (Терешки + Копили)</option>
+    <option value="tereschky">Тільки Терешки</option>
+    <option value="kopily">Тільки Копили</option>
   </select>
 
-  <label>TID поїздів (через кому або новий рядок)</label>
+  <label>TID поїздів</label>
   <button class="btn-icon" style="width:100%;margin-bottom:6px;font-size:13px" onclick="autoLoadTids()">🔄 Завантажити автоматично</button>
   <textarea id="tids" placeholder="28320, 28379, 28343..."></textarea>
   <div id="tidsStatus"></div>
-
-  <label>Станції маршруту (в потрібному порядку)</label>
-  <div class="stations-list" id="stationsList"></div>
-  <button class="btn-icon" style="margin-top:8px;width:100%" onclick="addStation()">+ Додати станцію</button>
 </div>
 
 <button class="btn btn-primary" id="parseBtn" onclick="startParsing()">🔍 Завантажити розклад</button>
 <button class="btn btn-retry" id="retryBtn" onclick="retryFailed()" style="display:none;">🔄 Дозавантажити</button>
+<button class="btn" id="copyAllBtn" onclick="copyAll()" style="display:none;background:var(--green);color:#000;">📋 Копіювати всі 4 напрямки</button>
 
 <div class="status" id="status"></div>
 <div class="progress-bar" id="progressBar"><div class="progress-fill" id="progressFill" style="width:0%"></div></div>
@@ -160,54 +158,57 @@ function getStationUseArr(name, poltavaIsDestination) {
 
 /* ========== INIT ========== */
 function onSearchStationChange() {
-  const key = document.getElementById('searchStation').value;
-  const list = document.getElementById('stationsList');
-  list.innerHTML = '';
-  PRESETS[key].stations.forEach(s => addStation(s));
   document.getElementById('tids').value = '';
   document.getElementById('tidsStatus').style.display = 'none';
 }
 
-function addStation(val = '') {
-  const list = document.getElementById('stationsList');
-  const div = document.createElement('div');
-  div.className = 'station-row';
-  div.innerHTML = `<input type="text" value="${val}" placeholder="Назва станції">
-    <button class="btn-icon" onclick="this.parentElement.remove()">✕</button>`;
-  list.appendChild(div);
-}
-
-function getStations() {
-  return [...document.querySelectorAll('#stationsList input')]
-    .map(i => i.value.trim()).filter(Boolean);
-}
+function getMode() { return document.getElementById('searchStation').value; }
 
 function getTids() {
   return document.getElementById('tids').value
     .split(/[\s,\n]+/).map(s => s.trim()).filter(s => /^\d+$/.test(s));
 }
 
-onSearchStationChange();
-
 /* ========== AUTO LOAD TIDS ========== */
 async function autoLoadTids() {
-  const key = document.getElementById('searchStation').value;
+  const mode = getMode();
   const statusEl = document.getElementById('tidsStatus');
   statusEl.style.display = 'block';
   statusEl.style.color = 'var(--accent)';
-  statusEl.textContent = '⏳ Завантажую список поїздів...';
-  try {
-    const res = await fetch(`/api/fetch-station?sid=${PRESETS[key].sid}`);
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    const data = await res.json();
-    if (!data.trains?.length) throw new Error('Поїзди не знайдені');
-    document.getElementById('tids').value = data.trains.map(t => t.tid).join(', ');
-    statusEl.style.color = 'var(--green)';
-    statusEl.textContent = `✅ Знайдено ${data.trains.length} поїздів: ${data.trains.map(t => t.trainNum).join(', ')}`;
-  } catch(e) {
-    statusEl.style.color = 'var(--red)';
-    statusEl.textContent = `❌ ${e.message}`;
+
+  const keys = mode === 'both' ? ['tereschky', 'kopily'] : [mode];
+  const allTids = [];
+  const allNums = [];
+
+  for (const key of keys) {
+    statusEl.textContent = `⏳ Завантажую список поїздів (${key})...`;
+    try {
+      const res = await fetch(`/api/fetch-station?sid=${PRESETS[key].sid}`);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+      if (!data.trains?.length) throw new Error('Поїзди не знайдені');
+      data.trains.forEach(t => {
+        if (!allTids.includes(t.tid)) { allTids.push(t.tid); allNums.push(t.trainNum); }
+      });
+    } catch(e) {
+      statusEl.style.color = 'var(--red)';
+      statusEl.textContent = `❌ ${e.message}`;
+      return;
+    }
   }
+
+  document.getElementById('tids').value = allTids.join(', ');
+  // Зберігаємо маппінг tid→маршрут
+  _tidRouteMap = {};
+  for (const key of keys) {
+    try {
+      const res = await fetch(`/api/fetch-station?sid=${PRESETS[key].sid}`);
+      const data = await res.json();
+      data.trains?.forEach(t => { _tidRouteMap[t.tid] = key; });
+    } catch(e) {}
+  }
+  statusEl.style.color = 'var(--green)';
+  statusEl.textContent = `✅ Знайдено ${allTids.length} поїздів: ${allNums.join(', ')}`;
 }
 
 /* ========== MATCHING ========== */
@@ -250,7 +251,7 @@ async function fetchTrain(tid, attempt = 0) {
 }
 
 /* ========== STATE ========== */
-let _state = { searchKey: null, stations: [], preset: null, results: [], failedTids: [] };
+let _state = { mode: null, results: [], failedTids: [] };
 
 function setStatus(msg, type='info') {
   const el = document.getElementById('status');
@@ -264,14 +265,12 @@ function setProgress(pct) {
 
 async function startParsing() {
   const tids = getTids();
-  const stations = getStations();
-  const searchKey = document.getElementById('searchStation').value;
-  const preset = PRESETS[searchKey];
+  const mode = getMode();
   if (!tids.length) { setStatus('Введіть TID поїздів', 'error'); return; }
-  if (!stations.length) { setStatus('Додайте станції', 'error'); return; }
-  _state = { searchKey, stations, preset, results: [], failedTids: [] };
+  _state = { mode, results: [], failedTids: [] };
   document.getElementById('output').innerHTML = '';
   document.getElementById('retryBtn').style.display = 'none';
+  document.getElementById('copyAllBtn').style.display = 'none';
   await runFetch(tids);
 }
 
@@ -283,24 +282,26 @@ async function retryFailed() {
   await runFetch(tids);
 }
 
-// Завантаження з обмеженим паралелізмом (максимум concurrency одночасно)
+// Обмежений паралелізм
 async function fetchWithLimit(tids, concurrency, onEach) {
   const queue = [...tids];
   const results = [];
   async function worker() {
     while (queue.length) {
       const tid = queue.shift();
-      const result = await onEach(tid);
-      results.push(result);
+      results.push(await onEach(tid));
     }
   }
-  const workers = Array.from({ length: Math.min(concurrency, tids.length) }, worker);
-  await Promise.all(workers);
+  await Promise.all(Array.from({ length: Math.min(concurrency, tids.length) }, worker));
   return results;
 }
 
+// Визначаємо до якого маршруту належить поїзд за його TID
+// Кожен TID зберігаємо разом із маршрутом при autoLoad
+let _tidRouteMap = {}; // tid -> 'tereschky' | 'kopily'
+
 async function runFetch(tids) {
-  const { searchKey, stations } = _state;
+  const { mode } = _state;
   document.getElementById('parseBtn').disabled = true;
   setStatus(`Завантажую ${tids.length} поїздів (макс. 4 паралельно)...`, 'info');
   setProgress(10);
@@ -311,8 +312,15 @@ async function runFetch(tids) {
       const data = await fetchTrain(tid);
       const trainNum = parseInt(data.trainNum) || 0;
       const isOdd = trainNum % 2 === 1;
-      const isT = searchKey === 'tereschky';
+
+      // Визначаємо маршрут цього поїзду
+      const routeKey = _tidRouteMap[tid] || (mode !== 'both' ? mode : guessRoute(data.stations));
+
+      const preset = PRESETS[routeKey] || PRESETS['tereschky'];
+      const stations = preset.stations;
+      const isT = routeKey === 'tereschky';
       const poltavaIsDestination = isT ? !isOdd : isOdd;
+
       const times = {};
       stations.forEach(st => {
         times[st] = findTime(data.stations, getStationSearch(st), getStationUseArr(st, poltavaIsDestination));
@@ -320,7 +328,7 @@ async function runFetch(tids) {
       done++;
       setProgress(10 + Math.round(done / tids.length * 85));
       setStatus(`Завантажую... ${done}/${tids.length}`, 'info');
-      return { tid, trainNum: data.trainNum, times, parity: trainNum % 2 };
+      return { tid, trainNum: data.trainNum, times, parity: trainNum % 2, routeKey, stations };
     } catch(e) {
       console.warn(`tid=${tid}:`, e.message);
       done++;
@@ -328,6 +336,7 @@ async function runFetch(tids) {
       return { tid, failed: true };
     }
   });
+
   allResults.forEach(r => {
     if (!r) return;
     if (r.failed) {
@@ -356,25 +365,46 @@ async function runFetch(tids) {
   document.getElementById('parseBtn').disabled = false;
 }
 
+// Визначаємо маршрут по назвах станцій у даних
+function guessRoute(stations) {
+  const names = stations.map(s => s.name.toLowerCase());
+  const hasKopily = names.some(n => n.includes('копил'));
+  return hasKopily ? 'kopily' : 'tereschky';
+}
+
 /* ========== RENDER ========== */
 function renderAll() {
-  const { searchKey, stations, preset, results } = _state;
+  const { mode, results } = _state;
   document.getElementById('output').innerHTML = '';
+
   const sortByTime = arr => arr.sort((a,b) => {
     const ta = Object.values(a.times).find(t => t !== '-') || '99:99';
     const tb = Object.values(b.times).find(t => t !== '-') || '99:99';
     return ta.localeCompare(tb);
   });
-  const odd  = results.filter(r => r.parity === 1);
-  const even = results.filter(r => r.parity === 0);
-  const isT = searchKey === 'tereschky';
-  const dirA = { trains: isT ? odd  : even, meta: preset.oddDir,  badge: isT ? 'odd' : 'even' };
-  const dirB = { trains: isT ? even : odd,  meta: preset.evenDir, badge: isT ? 'even' : 'odd' };
-  sortByTime(dirA.trains);
-  sortByTime(dirB.trains);
+
   const out = document.getElementById('output');
-  if (dirA.trains.length) renderBlock(out, dirA.trains, stations, dirA.meta, dirA.badge);
-  if (dirB.trains.length) renderBlock(out, dirB.trains, stations, dirB.meta, dirB.badge);
+  const keys = mode === 'both' ? ['tereschky', 'kopily'] : [mode];
+
+  keys.forEach(key => {
+    const preset = PRESETS[key];
+    const stations = preset.stations;
+    const isT = key === 'tereschky';
+    const routeResults = results.filter(r => r.routeKey === key);
+    const odd  = routeResults.filter(r => r.parity === 1);
+    const even = routeResults.filter(r => r.parity === 0);
+    const dirA = { trains: isT ? odd  : even, meta: preset.oddDir,  badge: isT ? 'odd' : 'even' };
+    const dirB = { trains: isT ? even : odd,  meta: preset.evenDir, badge: isT ? 'even' : 'odd' };
+    sortByTime(dirA.trains);
+    sortByTime(dirB.trains);
+    if (dirA.trains.length) renderBlock(out, dirA.trains, stations, dirA.meta, dirA.badge);
+    if (dirB.trains.length) renderBlock(out, dirB.trains, stations, dirB.meta, dirB.badge);
+  });
+
+  // Показуємо кнопку "Копіювати всі" якщо є результати
+  if (results.length) {
+    document.getElementById('copyAllBtn').style.display = 'block';
+  }
 }
 
 function renderBlock(container, results, stations, dir, parity) {
@@ -429,6 +459,16 @@ function buildJS(results, stations, dir) {
     return `      { loc: '${st}', times: [${times}], key: ${isKey} },`;
   });
   return `  {\n    id: '${dir.group}',\n    from: '${dir.from}',\n    to: '${dir.to}',\n    keyStop: '${dir.key}',\n    group: '${dir.group}',\n    cols: ['Станція'${results.map((_,i)=>`, 'Рейс${i+1}'`).join('')}],\n    rows: [\n${rows.join('\n')}\n    ]\n  },`;
+}
+
+function copyAll() {
+  const blocks = [...document.querySelectorAll('#output pre')];
+  const js = 'const ROUTES = [\n' + blocks.map(b => b.textContent).join('\n') + '\n];';
+  navigator.clipboard.writeText(js).then(() => {
+    const btn = document.getElementById('copyAllBtn');
+    btn.textContent = '✓ Скопійовано!';
+    setTimeout(() => btn.textContent = '📋 Копіювати всі 4 напрямки', 2000);
+  });
 }
 </script>
 </body>
